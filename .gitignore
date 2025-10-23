@@ -23,4 +23,4 @@ Thumbs.db
 
 # Foundry specific
 !lib/forge-std/
-!lib/openzeppelin-contracts/
+!lib/openzeppelin-contracts/broadcast/
