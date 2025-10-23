@@ -8,29 +8,19 @@ import {console} from "forge-std/console.sol";
 /**
  * @title DeployNFTMarketplace
  * @author SALAMI SELIM
- * @notice Script to deploy the NFTMarketplace contract
- * @dev Deploys with a specified marketplace fee, name, and symbol
+ * @notice Deploys the NFTMarketplace
  */
 contract DeployNFTMarketplace is Script {
-    uint256 public constant MARKETPLACE_FEE = 250; // 2.5% fee (in basis points)
-    string public constant NAME = "NFT Marketplace";
-    string public constant SYMBOL = "NFTM";
+    uint256 public constant MARKETPLACE_FEE_BPS = 250;
 
     function run() external returns (NFTMarketplace) {
         vm.startBroadcast();
-        
-        // Deploy the NFTMarketplace contract
-        NFTMarketplace marketplace = new NFTMarketplace(
-            MARKETPLACE_FEE,
-            NAME,
-            SYMBOL
-        );
-        
+
+        NFTMarketplace marketplace = new NFTMarketplace(MARKETPLACE_FEE_BPS);
         console.log("NFTMarketplace deployed at:", address(marketplace));
-        console.log("Deployer (owner):", msg.sender);
-        console.log("Marketplace fee:", marketplace.getMarketplaceFee());
-        
+        console.log("Owner (deployer):         ", msg.sender);
         vm.stopBroadcast();
         return marketplace;
+
     }
 }

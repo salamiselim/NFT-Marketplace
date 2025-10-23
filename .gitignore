@@ -1,33 +1,25 @@
-# Dependencies
-node_modules/
-lib/
-
-# Build artifacts
-out/
+# Foundry
 cache/
-
-# Deployment artifacts
+out/
 broadcast/
-deployments/
+forge-cache/
 
-# Environment variables
+# Environment
 .env
-*.env
+.env.local
 
-# IDE files
-.vscode/
+# IDE
 .idea/
+.vscode/
+*.swp
+*.swo
 
-# OS files
+# OS
 .DS_Store
 Thumbs.db
 
 # Logs
 *.log
-logs/
-
-# Local Net
-anvil/
 
 # Foundry specific
 !lib/forge-std/
