@@ -3,10 +3,18 @@ pragma solidity ^0.8.20;
 
 import {Test, console} from "forge-std/Test.sol";
 import {QuivaComic} from "../src/QuivaComic.sol";
+import {IERC1155} from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 contract QuivaComicTest is Test {
     // Events from QuivaComic.sol
-    event NFTMinted(address indexed creator, address indexed to, uint256 indexed tokenId, string tokenURI);
+    event NFTMinted(
+        address indexed creator,
+        address indexed to,
+        uint256 indexed tokenId,
+        uint256 amount,
+        string tokenURI
+    );
     event CreatorAdded(address indexed creator, address indexed addedBy);
     event CreatorRemoved(address indexed creator, address indexed removedBy);
     event BaseURIUpdated(string newBaseURI);
@@ -44,7 +52,12 @@ contract QuivaComicTest is Test {
 
     function test_Constructor_TokenCounterStartsAtOne() public view {
         assertEq(comic.getTokenCounter(), 1);
-        assertEq(comic.getTotalMinted(), 0);
+        assertEq(comic.getTotalTokenTypes(), 0);
+    }
+
+    function test_Constructor_SetsNameAndSymbol() public view {
+        assertEq(comic.name(), "Quiva Comic");
+        assertEq(comic.symbol(), "QUIVA");
     }
 
     //////////////////////
@@ -92,7 +105,7 @@ contract QuivaComicTest is Test {
 
     function testRevert_AddCreator_NotOwner() public {
         vm.prank(USER);
-        vm.expectRevert(); // OwnableUnauthorizedAccount
+        vm.expectRevert();
         comic.addCreator(CREATOR);
     }
 
@@ -127,7 +140,7 @@ contract QuivaComicTest is Test {
         comic.addCreator(CREATOR);
 
         vm.prank(USER);
-        vm.expectRevert(); // OwnableUnauthorizedAccount
+        vm.expectRevert();
         comic.removeCreator(CREATOR);
     }
 
@@ -135,17 +148,36 @@ contract QuivaComicTest is Test {
     // Minting Tests //
     //////////////////////
 
-    function test_MintNFT_Success() public {
+    function test_MintNFT_UniqueNFT() public {
         vm.expectEmit(true, true, true, true, address(comic));
-        emit NFTMinted(OWNER, RECIPIENT, 1, TOKEN_URI);
+        emit NFTMinted(OWNER, RECIPIENT, 1, 1, TOKEN_URI);
 
         vm.prank(OWNER);
-        uint256 tokenId = comic.mintNFT(RECIPIENT, TOKEN_URI);
+        uint256 tokenId = comic.mintNFT(RECIPIENT, 1, TOKEN_URI, 1); // Unique 1-of-1
 
         assertEq(tokenId, 1);
-        assertEq(comic.ownerOf(1), RECIPIENT);
+        assertEq(comic.balanceOf(RECIPIENT, 1), 1);
+        assertEq(comic.totalSupply(1), 1);
+        assertEq(comic.uri(1), TOKEN_URI);
+        assertEq(comic.getTotalTokenTypes(), 1);
 
-        assertEq(comic.tokenURI(1), string(abi.encodePacked(BASE_URI, TOKEN_URI)));
+        QuivaComic.TokenMetadata memory meta = comic.getTokenMetadata(1);
+        assertEq(meta.creator, OWNER);
+        assertEq(meta.maxSupply, 1);
+    }
+
+    function test_MintNFT_Edition() public {
+        vm.prank(OWNER);
+        uint256 tokenId = comic.mintNFT(RECIPIENT, 100, TOKEN_URI, 1000); // 100 copies, max 1000
+
+        assertEq(tokenId, 1);
+        assertEq(comic.balanceOf(RECIPIENT, 1), 100);
+        assertEq(comic.totalSupply(1), 100);
+        assertEq(comic.uri(1), TOKEN_URI);
+        assertEq(comic.getTotalTokenTypes(), 1);
+
+        QuivaComic.TokenMetadata memory meta = comic.getTokenMetadata(1);
+        assertEq(meta.maxSupply, 1000);
     }
 
     function test_MintNFTToSelf_Success() public {
@@ -153,128 +185,151 @@ contract QuivaComicTest is Test {
         uint256 tokenId = comic.mintNFTToSelf(TOKEN_URI);
 
         assertEq(tokenId, 1);
-        assertEq(comic.ownerOf(1), OWNER);
+        assertEq(comic.balanceOf(OWNER, 1), 1);
+        assertEq(comic.uri(1), TOKEN_URI);
+        assertEq(comic.getTotalTokenTypes(), 1);
+    }
 
-        assertEq(comic.tokenURI(1), string(abi.encodePacked(BASE_URI, TOKEN_URI)));
+    function test_MintMore_Success() public {
+        // Initial mint
+        vm.prank(OWNER);
+        uint256 tokenId = comic.mintNFT(RECIPIENT, 50, TOKEN_URI, 200);
+
+        // Mint more of same token
+        vm.expectEmit(true, true, true, true, address(comic));
+        emit NFTMinted(OWNER, RECIPIENT, tokenId, 75, TOKEN_URI);
+
+        vm.prank(OWNER);
+        comic.mintMore(tokenId, RECIPIENT, 75);
+
+        assertEq(comic.balanceOf(RECIPIENT, tokenId), 125);
+        assertEq(comic.totalSupply(tokenId), 125);
+        assertEq(comic.getTotalTokenTypes(), 1);
+    }
+
+    function testRevert_MintMore_ExceedsMaxSupply() public {
+        vm.prank(OWNER);
+        uint256 tokenId = comic.mintNFT(RECIPIENT, 50, TOKEN_URI, 100);
+
+        vm.prank(OWNER);
+        vm.expectRevert("Exceeds max supply");
+        comic.mintMore(tokenId, RECIPIENT, 51);
+    }
+
+    function testRevert_MintMore_NotCreator() public {
+        vm.prank(OWNER);
+        comic.addCreator(CREATOR);
+        vm.prank(CREATOR);
+        uint256 tokenId = comic.mintNFT(RECIPIENT, 1, TOKEN_URI, 0);
+
+        vm.prank(OWNER);
+        vm.expectRevert("Not token creator");
+        comic.mintMore(tokenId, RECIPIENT, 1);
+    }
+
+    function testRevert_MintMore_TokenDoesNotExist() public {
+        vm.prank(OWNER);
+        vm.expectRevert(QuivaComic.QuivaComic__TokenDoesNotExist.selector);
+        comic.mintMore(999, RECIPIENT, 1);
     }
 
     function test_BatchMintNFTs_Success() public {
-        address[] memory recipients = new address[](2);
-        string[] memory uris = new string[](2);
-        recipients[0] = RECIPIENT;
-        recipients[1] = USER;
-        uris[0] = TOKEN_URI;
-        uris[1] = TOKEN_URI_2;
+    address[] memory recipients = new address[](2);
+    uint256[] memory amounts = new uint256[](2);
+    string[] memory uris = new string[](2);
+    uint256[] memory maxSupplies = new uint256[](2);
 
-        vm.prank(OWNER);
-        uint256[] memory tokenIds = comic.batchMintNFTs(recipients, uris);
+    recipients[0] = RECIPIENT;
+    recipients[1] = USER;
+    amounts[0] = 10;
+    amounts[1] = 5;
+    uris[0] = TOKEN_URI;
+    uris[1] = TOKEN_URI_2;
+    maxSupplies[0] = 100;
+    maxSupplies[1] = 50;
 
-        assertEq(tokenIds.length, 2);
-        assertEq(comic.ownerOf(1), RECIPIENT);
-        assertEq(comic.ownerOf(2), USER);
+    vm.startPrank(OWNER);
+    // Expect two mint events
+    vm.expectEmit(true, true, true, true, address(comic));
+    emit NFTMinted(OWNER, RECIPIENT, 1, 10, TOKEN_URI);
+    vm.expectEmit(true, true, true, true, address(comic));
+    emit NFTMinted(OWNER, USER, 2, 5, TOKEN_URI_2);
 
-        assertEq(comic.tokenURI(1), string(abi.encodePacked(BASE_URI, TOKEN_URI)));
-        assertEq(comic.tokenURI(2), string(abi.encodePacked(BASE_URI, TOKEN_URI_2)));
+    uint256[] memory tokenIds = comic.batchMintNFTs(recipients, amounts, uris, maxSupplies);
+    vm.stopPrank();
+
+    assertEq(tokenIds[0], 1);
+    assertEq(tokenIds[1], 2);
+    assertEq(comic.balanceOf(RECIPIENT, 1), 10);
+    assertEq(comic.balanceOf(USER, 2), 5);
+    assertEq(comic.getTotalTokenTypes(), 2);
     }
 
-    function test_MintMultiple_Success() public {
+    function testRevert_BatchMintNFTs_ArrayMismatch() public {
+        address[] memory recipients = new address[](1);
+        uint256[] memory amounts = new uint256[](2);
+        string[] memory uris = new string[](1);
+        uint256[] memory maxSupplies = new uint256[](1);
+
         vm.prank(OWNER);
-        uint256[] memory tokenIds = comic.mintMultiple(RECIPIENT, 3, "ipfs://comic");
+        vm.expectRevert(QuivaComic.QuivaComic__ArrayLengthMismatch.selector);
+        comic.batchMintNFTs(recipients, amounts, uris, maxSupplies);
+    }
 
-        assertEq(tokenIds.length, 3);
-        assertEq(comic.ownerOf(1), RECIPIENT);
-        assertEq(comic.ownerOf(2), RECIPIENT);
-        assertEq(comic.ownerOf(3), RECIPIENT);
+    function testRevert_BatchMintNFTs_EmptyArray() public {
+        address[] memory empty = new address[](0);
+        uint256[] memory amounts = new uint256[](0);
+        string[] memory uris = new string[](0);
+        uint256[] memory maxSupplies = new uint256[](0);
 
-        assertEq(comic.tokenURI(1), string(abi.encodePacked(BASE_URI, "ipfs://comic1")));
-        assertEq(comic.tokenURI(2), string(abi.encodePacked(BASE_URI, "ipfs://comic2")));
-        assertEq(comic.tokenURI(3), string(abi.encodePacked(BASE_URI, "ipfs://comic3")));
+       
+
+        vm.prank(OWNER);
+        vm.expectRevert(QuivaComic.QuivaComic__EmptyArray.selector);
+        comic.batchMintNFTs(empty, amounts, uris, maxSupplies);
+    }
+
+    function test_MintEdition_Success() public {
+        vm.prank(OWNER);
+        uint256 tokenId = comic.mintEdition(RECIPIENT, 25, TOKEN_URI, 500);
+
+        assertEq(tokenId, 1);
+        assertEq(comic.balanceOf(RECIPIENT, 1), 25);
+        assertEq(comic.uri(1), TOKEN_URI);
+    }
+
+    function testRevert_MintNFT_InvalidAmount() public {
+        vm.prank(OWNER);
+        vm.expectRevert(QuivaComic.QuivaComic__InvalidAmount.selector);
+        comic.mintNFT(RECIPIENT, 0, TOKEN_URI, 1);
+    }
+
+    function testRevert_MintNFT_InvalidURI() public {
+        vm.prank(OWNER);
+        vm.expectRevert(QuivaComic.QuivaComic__InvalidTokenURI.selector);
+        comic.mintNFT(RECIPIENT, 1, "", 1);
     }
 
     function testRevert_MintNFT_NotCreator() public {
         vm.prank(USER);
         vm.expectRevert(QuivaComic.QuivaComic__OnlyCreatorCanMint.selector);
-        comic.mintNFT(RECIPIENT, TOKEN_URI);
-    }
-
-    function testRevert_MintNFT_InvalidTokenURI() public {
-        vm.prank(OWNER);
-        vm.expectRevert(QuivaComic.QuivaComic__InvalidTokenURI.selector);
-        comic.mintNFT(RECIPIENT, "");
-    }
-
-    function testRevert_BatchMintNFTs_MismatchArrays() public {
-        address[] memory recipients = new address[](2);
-        string[] memory uris = new string[](1);
-        vm.prank(OWNER);
-        vm.expectRevert(QuivaComic.QuivaComic__ArrayLengthMismatch.selector);
-        comic.batchMintNFTs(recipients, uris);
-    }
-
-    function testRevert_BatchMintNFTs_EmptyArray() public {
-        address[] memory empty = new address[](0);
-        string[] memory emptyUris = new string[](0);
-        vm.prank(OWNER);
-        vm.expectRevert(QuivaComic.QuivaComic__EmptyArray.selector);
-        comic.batchMintNFTs(empty, emptyUris);
-    }
-
-    function testRevert_MintMultiple_ZeroCount() public {
-        vm.prank(OWNER);
-        vm.expectRevert(QuivaComic.QuivaComic__EmptyArray.selector);
-        comic.mintMultiple(RECIPIENT, 0, "ipfs://");
+        comic.mintNFT(RECIPIENT, 1, TOKEN_URI, 1);
     }
 
     //////////////////////
-    // Getters Tests //
+    // Metadata & URI //
     //////////////////////
 
-    function test_GetTokensByCreator_Success() public {
-        vm.startPrank(OWNER);
-        comic.mintNFT(RECIPIENT, TOKEN_URI);
-        comic.mintNFT(USER, TOKEN_URI_2);
-        vm.stopPrank();
-
-        uint256[] memory tokens = comic.getTokensByCreator(OWNER);
-        assertEq(tokens.length, 2);
-        assertEq(tokens[0], 1);
-        assertEq(tokens[1], 2);
-    }
-
-    function test_GetTokensByCreatorPaginated_Success() public {
-        vm.startPrank(OWNER);
-        comic.mintNFT(RECIPIENT, TOKEN_URI);
-        comic.mintNFT(USER, TOKEN_URI_2);
-        comic.mintNFT(RECIPIENT, "ipfs://comic3");
-        vm.stopPrank();
-
-        (uint256[] memory tokens, uint256 total) = comic.getTokensByCreatorPaginated(OWNER, 1, 1);
-        assertEq(total, 3);
-        assertEq(tokens.length, 1);
-        assertEq(tokens[0], 2);
-    }
-
-    function test_GetTokensByOwner_Success() public {
-        vm.startPrank(OWNER);
-        comic.mintNFT(RECIPIENT, TOKEN_URI);
-        comic.mintNFT(RECIPIENT, TOKEN_URI_2);
-        vm.stopPrank();
-
-        uint256[] memory tokens = comic.getTokensByOwner(RECIPIENT);
-        assertEq(tokens.length, 2);
-        assertEq(tokens[0], 1);
-        assertEq(tokens[1], 2);
-    }
-
-    function test_GetCreatorOf_Success() public {
+    function test_URI_SpecificURI() public {
         vm.prank(OWNER);
-        uint256 tokenId = comic.mintNFT(RECIPIENT, TOKEN_URI);
-        assertEq(comic.getCreatorOf(tokenId), OWNER);
+        comic.mintNFT(RECIPIENT, 1, TOKEN_URI, 1);
+        assertEq(comic.uri(1), TOKEN_URI);
     }
 
-    //////////////////////
-    // Owner Functions //
-    //////////////////////
+    function testRevert_URI_TokenDoesNotExist() public {
+        vm.expectRevert(QuivaComic.QuivaComic__TokenDoesNotExist.selector);
+        comic.uri(999);
+    }
 
     function test_SetBaseURI_Success() public {
         string memory newURI = "ipfs://newbase/";
@@ -287,29 +342,81 @@ contract QuivaComicTest is Test {
 
     function testRevert_SetBaseURI_NotOwner() public {
         vm.prank(USER);
-        vm.expectRevert(); // OwnableUnauthorizedAccount
+        vm.expectRevert();
         comic.setBaseURI("ipfs://hack/");
     }
 
     //////////////////////
-    // Fuzz Tests //
+    // Getters & Views //
     //////////////////////
 
-    function testFuzz_MintNFT(string memory uri) public {
-        vm.assume(bytes(uri).length > 0);
-
+    function test_GetTokenMetadata_Success() public {
         vm.prank(OWNER);
-        uint256 tokenId = comic.mintNFT(RECIPIENT, uri);
+        comic.mintNFT(RECIPIENT, 1, TOKEN_URI, 100);
 
-        string memory expectedURI = string(abi.encodePacked(BASE_URI, uri));
-        assertEq(comic.tokenURI(tokenId), expectedURI);
+        QuivaComic.TokenMetadata memory meta = comic.getTokenMetadata(1);
+        assertEq(meta.creator, OWNER);
+        assertEq(meta.uri, TOKEN_URI);
+        assertEq(meta.maxSupply, 100);
+        assertGt(meta.mintTimestamp, 0);
     }
 
-    function testFuzz_AddCreator(address creator) public {
-        vm.assume(creator != address(0));
-        vm.assume(creator != OWNER);
+    function test_GetCreatorOf_Success() public {
         vm.prank(OWNER);
-        comic.addCreator(creator);
-        assertTrue(comic.isCreator(creator));
+        comic.mintNFT(RECIPIENT, 1, TOKEN_URI, 1);
+        assertEq(comic.getCreatorOf(1), OWNER);
+    }
+
+    function test_GetTokensByCreator_Success() public {
+    vm.startPrank(OWNER); // ← ALL calls from OWNER
+    comic.mintNFT(RECIPIENT, 1, TOKEN_URI, 1);
+    comic.mintNFT(RECIPIENT, 1, TOKEN_URI_2, 1);
+    vm.stopPrank();
+
+    uint256[] memory tokens = comic.getTokensByCreator(OWNER);
+    assertEq(tokens.length, 2);
+    assertEq(tokens[0], 1);
+    assertEq(tokens[1], 2);
+   }
+
+    function test_GetTokensByCreatorPaginated_Success() public {
+        vm.startPrank(OWNER);
+        comic.mintNFT(RECIPIENT, 1, TOKEN_URI, 1);
+        comic.mintNFT(RECIPIENT, 1, TOKEN_URI_2, 1);
+        comic.mintNFT(RECIPIENT, 1, "ipfs://3", 1);
+        vm.stopPrank();
+
+        (uint256[] memory tokens, uint256 total) = comic.getTokensByCreatorPaginated(OWNER, 1, 1);
+        assertEq(total, 3);
+        assertEq(tokens.length, 1);
+        assertEq(tokens[0], 2);
+    }
+
+    function test_GetTokensByOwner_Success() public {
+    vm.startPrank(OWNER);
+    comic.mintNFT(RECIPIENT, 10, TOKEN_URI, 100); // tokenId=1
+    comic.mintNFT(USER, 5, TOKEN_URI_2, 50);      // tokenId=2
+    vm.stopPrank();
+
+    (uint256[] memory ids, uint256[] memory balances) = comic.getTokensByOwner(RECIPIENT);
+    assertEq(ids.length, 1);
+    assertEq(ids[0], 1);
+    assertEq(balances[0], 10);
+
+    (ids, balances) = comic.getTokensByOwner(USER);
+    assertEq(ids.length, 1);
+    assertEq(ids[0], 2);
+    assertEq(balances[0], 5);
+   }
+
+    function test_GetTokensByOwner_Empty() public view {
+        (uint256[] memory ids, uint256[] memory balances) = comic.getTokensByOwner(USER);
+        assertEq(ids.length, 0);
+        assertEq(balances.length, 0);
+    }
+
+    function test_SupportsInterface() public view {
+        assertTrue(comic.supportsInterface(type(IERC1155).interfaceId));
+        assertTrue(comic.supportsInterface(type(IAccessControl).interfaceId));
     }
 }
